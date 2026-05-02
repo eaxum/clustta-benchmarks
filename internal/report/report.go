@@ -95,8 +95,8 @@ set linetype 6 lc rgb "#fc1a70"
 	cols := 2
 	rows := (nSystems + 1) / 2
 
-	fmt.Fprintln(f, `set term svg size 1200,960 background "#2b2b2b"`)
-	fmt.Fprintln(f, `set output 'benchmark_per_system.svg'`)
+	fmt.Fprintln(f, `set term pngcairo size 1200,960 background "#2b2b2b" font "Sans,10"`)
+	fmt.Fprintln(f, `set output 'benchmark_per_system.png'`)
 	fmt.Fprintf(f, "set multiplot layout %d, %d columns\n\n", rows, cols)
 	fmt.Fprintln(f, `set ylabel 'Size (GB)'`)
 	fmt.Fprintln(f, `set y2label 'Time (Seconds)'`)
@@ -139,8 +139,8 @@ set linetype 6 lc rgb "#fc1a70"
 	// ── Summary comparison overlay ──────────────────────────────────────
 	fmt.Fprintln(f, "")
 	fmt.Fprintln(f, `# ── Summary comparison ──`)
-	fmt.Fprintln(f, `set term svg size 1200,500 background "#2b2b2b"`)
-	fmt.Fprintln(f, `set output 'benchmark_summary.svg'`)
+	fmt.Fprintln(f, `set term pngcairo size 1200,500 background "#2b2b2b" font "Sans,10"`)
+	fmt.Fprintln(f, `set output 'benchmark_summary.png'`)
 	fmt.Fprintf(f, "set multiplot layout 1, 2\n\n")
 
 	// Left panel: cumulative commit time.

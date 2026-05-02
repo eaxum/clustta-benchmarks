@@ -20,8 +20,8 @@ set linetype 3 lc rgb "#c0c0c0"
 set linetype 4 lc rgb "#0087ff"
 set linetype 5 lc rgb "#b050e8"
 set linetype 6 lc rgb "#fc1a70"
-set term svg size 1200,960 background "#2b2b2b"
-set output 'benchmark_per_system.svg'
+set term pngcairo size 1200,960 background "#2b2b2b" font "Sans,10"
+set output 'benchmark_per_system.png'
 set multiplot layout 3, 2 columns
 
 set ylabel 'Size (GB)'
@@ -71,8 +71,8 @@ plot './test_clustta.csv' using 1:($2/1e3) with lines title 'Local checkout (GB)
 unset multiplot
 
 # ── Summary comparison ──
-set term svg size 1200,500 background "#2b2b2b"
-set output 'benchmark_summary.svg'
+set term pngcairo size 1200,500 background "#2b2b2b" font "Sans,10"
+set output 'benchmark_summary.png'
 set multiplot layout 1, 2
 
 set title 'Cumulative commit time'

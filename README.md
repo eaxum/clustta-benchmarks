@@ -24,7 +24,7 @@ This benchmark extends that approach by adding Clustta and Perforce to the compa
 
 155 commits from a real Clustta creative project (~4.5 GB of `.blend` files) replayed into each system. Lower is better on both axes.
 
-![Summary comparison](results/benchmark_summary.svg)
+![Summary comparison](results/benchmark_summary.png)
 
 | System | Cumulative commit time | Repository size |
 |--------|----------------------:|----------------:|
@@ -104,11 +104,11 @@ go run ./cmd/benchmark \
 # Regenerate charts from existing CSV data
 go run ./cmd/benchmark --output ./results --report-only
 
-# Generate SVG charts with gnuplot
+# Generate PNG charts with gnuplot
 cd results
 gnuplot plot_benchmark.gnuplot
-# Opens: benchmark_per_system.svg  (2x2 per-system detail)
-#        benchmark_summary.svg     (side-by-side comparison overlay)
+# Opens: benchmark_per_system.png  (2x2 per-system detail)
+#        benchmark_summary.png     (side-by-side comparison overlay)
 ```
 
 ### Flags
