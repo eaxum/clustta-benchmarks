@@ -53,11 +53,12 @@ This benchmark extends that approach by adding Clustta and Perforce to the compa
 
 The benchmark follows the same basic approach Blender Studio used:
 
-1. **Extract** a chronological timeline of commits/checkpoint groups from an existing project repo
-2. **Reconstruct** the full files
-3. **Replay** the same sequence of file changes identically into fresh Git, Git LFS, SVN, Perforce, and Clustta repositories
-4. **Measure** per-commit: commit/add time (seconds) and cumulative metadata/repository size (MB)
-5. **Output** CSV data files and gnuplot visualisation scripts
+1. **Open** the source `.clst` project and build a chronological timeline of commit groups
+2. **Stream** one commit at a time: reconstruct files from chunks, replay into all systems, then delete the staged files before moving to the next commit
+3. **Measure** per-commit: commit/add time (seconds) and cumulative metadata/repository size (MB)
+4. **Output** CSV data files and gnuplot visualisation scripts
+
+Streaming extraction keeps disk usage low -- only one commit's files exist on disk at a time, making it possible to benchmark projects far larger than available free space.
 
 ### What each replayer does
 
@@ -81,20 +82,29 @@ The benchmark follows the same basic approach Blender Studio used:
 ## Usage
 
 ```bash
-# Full run: extract timeline + replay all 5 systems
+# Full run: stream and replay all 5 systems
 go run ./cmd/benchmark \
   --source "/path/to/project.clst" \
   --output ./results \
   --systems git,git-lfs,svn,perforce,clustta
 
-# Re-run specific systems without re-extracting (uses saved timeline.json)
+# Benchmark only the first 100 commits (useful for large projects)
+go run ./cmd/benchmark \
+  --source "/path/to/project.clst" \
+  --output ./results \
+  --limit 100
+
+# Re-run specific systems using pre-staged files (batch mode)
 go run ./cmd/benchmark \
   --source "/path/to/project.clst" \
   --output ./results \
   --systems svn,clustta \
   --skip-extract
 
-# Generate SVG charts from results
+# Regenerate charts from existing CSV data
+go run ./cmd/benchmark --output ./results --report-only
+
+# Generate SVG charts with gnuplot
 cd results
 gnuplot plot_benchmark.gnuplot
 # Opens: benchmark_per_system.svg  (2x2 per-system detail)
@@ -108,7 +118,9 @@ gnuplot plot_benchmark.gnuplot
 | `--source` | *(required)* | Path to source `.clst` file |
 | `--output` | `./results` | Output directory for repos, CSVs, and charts |
 | `--systems` | `git,git-lfs,svn,perforce,clustta` | Comma-separated list of systems to benchmark |
-| `--skip-extract` | `false` | Skip extraction phase, reuse previously staged files |
+| `--limit` | `0` (all) | Max number of commit groups to process |
+| `--skip-extract` | `false` | Use pre-staged files instead of streaming from `.clst` |
+| `--report-only` | `false` | Regenerate gnuplot script from existing CSV data |
 
 ## References
 

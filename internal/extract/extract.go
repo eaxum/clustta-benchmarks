@@ -495,3 +495,213 @@ func totalFileSize(files []FileOp) int64 {
 	}
 	return total
 }
+
+// StreamSource holds an open .clst database for streaming extraction.
+type StreamSource struct {
+	db *sqlx.DB
+}
+
+// OpenStream opens a .clst for streaming extraction.
+func OpenStream(clstPath string) (*StreamSource, error) {
+	db, err := sqlx.Open("sqlite3", clstPath+"?_journal=WAL&mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	return &StreamSource{db: db}, nil
+}
+
+// Close closes the database.
+func (s *StreamSource) Close() error {
+	return s.db.Close()
+}
+
+// BuildTimeline returns commit groups without reconstructing files.
+func (s *StreamSource) BuildTimeline() ([]CommitGroup, error) {
+	var rows []CheckpointRow
+	err := s.db.Select(&rows, `
+		SELECT 
+			ac.id, ac.created_at, ac.asset_id, ac.file_size, ac.chunks, 
+			ac.group_id, ac.time_modified,
+			a.name AS asset_name, a.extension,
+			IFNULL(c.collection_path, '/') AS coll_path
+		FROM asset_checkpoint ac
+		JOIN asset a ON ac.asset_id = a.id
+		LEFT JOIN collection c ON a.collection_id = c.id
+		WHERE ac.trashed = 0
+		ORDER BY ac.created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query checkpoints: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("no checkpoints found")
+	}
+
+	var hashes []string
+	err = s.db.Select(&hashes, "SELECT hash FROM chunk")
+	if err != nil {
+		return nil, fmt.Errorf("query chunks: %w", err)
+	}
+	localChunks := make(map[string]bool, len(hashes))
+	for _, h := range hashes {
+		localChunks[h] = true
+	}
+	fmt.Printf("  Local chunk store: %d chunks\n", len(localChunks))
+
+	var available []CheckpointRow
+	skipped := 0
+	for _, r := range rows {
+		parts := strings.Split(r.Chunks, ",")
+		ok := true
+		for _, h := range parts {
+			if h != "" && !localChunks[h] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			available = append(available, r)
+		} else {
+			skipped++
+		}
+	}
+	fmt.Printf("  Checkpoints: %d available, %d skipped\n", len(available), skipped)
+
+	if len(available) == 0 {
+		return nil, fmt.Errorf("no checkpoints with complete chunk data")
+	}
+
+	type groupEntry struct {
+		minTime string
+		rows    []CheckpointRow
+	}
+	groupMap := make(map[string]*groupEntry)
+	var groupOrder []string
+	emptyIdx := 0
+
+	for _, r := range available {
+		gid := r.GroupId
+		if gid == "" {
+			gid = fmt.Sprintf("__solo_%d", emptyIdx)
+			emptyIdx++
+		}
+		if _, ok := groupMap[gid]; !ok {
+			groupMap[gid] = &groupEntry{minTime: r.CreatedAt}
+			groupOrder = append(groupOrder, gid)
+		}
+		g := groupMap[gid]
+		if r.CreatedAt < g.minTime {
+			g.minTime = r.CreatedAt
+		}
+		g.rows = append(g.rows, r)
+	}
+
+	sort.Slice(groupOrder, func(i, j int) bool {
+		return groupMap[groupOrder[i]].minTime < groupMap[groupOrder[j]].minTime
+	})
+
+	seenAssets := make(map[string]bool)
+	var groups []CommitGroup
+
+	for idx, gid := range groupOrder {
+		ge := groupMap[gid]
+		cg := CommitGroup{
+			Index:     idx + 1,
+			GroupId:   gid,
+			Timestamp: ge.minTime,
+		}
+		for _, r := range ge.rows {
+			relDir := strings.Trim(r.CollPath, "/")
+			fileName := r.AssetName + "." + r.Extension
+			var relPath string
+			if relDir == "" {
+				relPath = fileName
+			} else {
+				relPath = filepath.Join(relDir, fileName)
+			}
+			op := "modify"
+			if !seenAssets[r.AssetId] {
+				op = "add"
+				seenAssets[r.AssetId] = true
+			}
+			cg.Files = append(cg.Files, FileOp{
+				RelPath:   relPath,
+				Operation: op,
+				FileSize:  r.FileSize,
+			})
+		}
+		groups = append(groups, cg)
+	}
+	return groups, nil
+}
+
+// StageGroup reconstructs files for one commit group.
+func (s *StreamSource) StageGroup(group *CommitGroup, stagingDir string) error {
+	commitDir := filepath.Join(stagingDir, fmt.Sprintf("%04d", group.Index))
+	os.MkdirAll(commitDir, 0755)
+
+	var checkpoints []CheckpointRow
+	gid := group.GroupId
+
+	if strings.HasPrefix(gid, "__solo_") {
+		err := s.db.Select(&checkpoints, `
+			SELECT ac.id, ac.chunks, ac.file_size,
+				a.name AS asset_name, a.extension,
+				IFNULL(c.collection_path, '/') AS coll_path
+			FROM asset_checkpoint ac
+			JOIN asset a ON ac.asset_id = a.id
+			LEFT JOIN collection c ON a.collection_id = c.id
+			WHERE ac.trashed = 0 AND (ac.group_id = '' OR ac.group_id IS NULL)
+			ORDER BY ac.created_at ASC
+		`)
+		if err != nil {
+			return fmt.Errorf("query solo checkpoints: %w", err)
+		}
+	} else {
+		err := s.db.Select(&checkpoints, `
+			SELECT ac.id, ac.chunks, ac.file_size,
+				a.name AS asset_name, a.extension,
+				IFNULL(c.collection_path, '/') AS coll_path
+			FROM asset_checkpoint ac
+			JOIN asset a ON ac.asset_id = a.id
+			LEFT JOIN collection c ON a.collection_id = c.id
+			WHERE ac.group_id = ? AND ac.trashed = 0
+		`, gid)
+		if err != nil {
+			return fmt.Errorf("query checkpoints: %w", err)
+		}
+	}
+
+	cpMap := make(map[string]CheckpointRow)
+	for _, cp := range checkpoints {
+		relDir := strings.Trim(cp.CollPath, "/")
+		fileName := cp.AssetName + "." + cp.Extension
+		var relPath string
+		if relDir == "" {
+			relPath = fileName
+		} else {
+			relPath = filepath.Join(relDir, fileName)
+		}
+		cpMap[relPath] = cp
+	}
+
+	for i := range group.Files {
+		f := &group.Files[i]
+		cp, ok := cpMap[f.RelPath]
+		if !ok {
+			continue
+		}
+		outPath := filepath.Join(commitDir, f.RelPath)
+		os.MkdirAll(filepath.Dir(outPath), 0755)
+		if err := rebuildFileFromChunks(s.db, cp.Chunks, outPath); err != nil {
+			return fmt.Errorf("rebuild %s: %w", f.RelPath, err)
+		}
+		f.TempPath = outPath
+	}
+	return nil
+}
+
+// CleanGroup removes staged files for a commit group.
+func CleanGroup(stagingDir string, index int) error {
+	return os.RemoveAll(filepath.Join(stagingDir, fmt.Sprintf("%04d", index)))
+}

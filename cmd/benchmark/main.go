@@ -15,9 +15,10 @@ import (
 func main() {
 	source := flag.String("source", "", "Path to the source .clst file")
 	output := flag.String("output", "./results", "Output directory for results")
-	systems := flag.String("systems", "git,git-lfs,svn,perforce,clustta", "Comma-separated list of systems to benchmark (git,git-lfs,svn,perforce,clustta)")
-	skipExtract := flag.Bool("skip-extract", false, "Skip extraction if staging dir already exists")
-	reportOnly := flag.Bool("report-only", false, "Regenerate gnuplot script and CSV list from existing data (no replay)")
+	systems := flag.String("systems", "git,git-lfs,svn,perforce,clustta", "Comma-separated list of systems to benchmark")
+	limit := flag.Int("limit", 0, "Max commit groups to process (0 = all)")
+	skipExtract := flag.Bool("skip-extract", false, "Use pre-staged files instead of streaming")
+	reportOnly := flag.Bool("report-only", false, "Regenerate gnuplot script from existing CSV data")
 	flag.Parse()
 
 	absOutput, _ := filepath.Abs(*output)
@@ -26,8 +27,7 @@ func main() {
 		systemList := parseSystemList(*systems)
 		var csvSystems []string
 		for _, sysName := range systemList {
-			displayName := systemDisplayName(sysName)
-			csvSystems = append(csvSystems, displayName)
+			csvSystems = append(csvSystems, systemDisplayName(sysName))
 		}
 		if err := report.WriteGnuplotScript(absOutput, csvSystems); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing gnuplot script: %v\n", err)
@@ -38,117 +38,136 @@ func main() {
 	}
 
 	if *source == "" {
-		fmt.Fprintln(os.Stderr, "Usage: benchmark --source <path-to.clst> [--output <dir>] [--systems <list>]")
+		fmt.Fprintln(os.Stderr, "Usage: benchmark --source <path-to.clst> [--output <dir>] [--systems <list>] [--limit <n>]")
 		os.Exit(1)
 	}
 
 	absSource, _ := filepath.Abs(*source)
 	stagingDir := filepath.Join(absOutput, "staging")
-
 	systemList := parseSystemList(*systems)
+
 	fmt.Printf("Benchmark Configuration:\n")
 	fmt.Printf("  Source:  %s\n", absSource)
 	fmt.Printf("  Output:  %s\n", absOutput)
 	fmt.Printf("  Systems: %v\n", systemList)
+	if *limit > 0 {
+		fmt.Printf("  Limit:   %d commits\n", *limit)
+	}
 	fmt.Println()
 
-	// ═══════════════════════════════════════════════════════════════
-	// STEP 1: EXTRACT TIMELINE + RECONSTRUCT FILES
-	// ═══════════════════════════════════════════════════════════════
+	// Build or load timeline.
 	var groups []extract.CommitGroup
-	var err error
+	var stream *extract.StreamSource
 
 	if *skipExtract {
-		fmt.Println("Skipping extraction (--skip-extract), loading saved timeline...")
+		fmt.Println("Loading saved timeline (--skip-extract)...")
 		timelinePath := filepath.Join(stagingDir, "timeline.json")
+		var err error
 		groups, err = extract.LoadTimeline(timelinePath, stagingDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading timeline.json: %v\n", err)
-			fmt.Fprintln(os.Stderr, "  (Run without --skip-extract first to generate it.)")
+			fmt.Fprintf(os.Stderr, "Error loading timeline: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Loaded %d commit groups from timeline.json\n\n", len(groups))
 	} else {
-		fmt.Println("Step 1: Extracting timeline and reconstructing files...")
-		startExtract := time.Now()
-
-		os.MkdirAll(stagingDir, 0755)
-		groups, err = extract.StageAll(absSource, stagingDir)
+		fmt.Println("Building timeline from .clst...")
+		var err error
+		stream, err = extract.OpenStream(absSource)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error during extraction: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("\nExtracted %d commit groups in %s\n\n", len(groups), time.Since(startExtract).Round(time.Second))
+		defer stream.Close()
+		groups, err = stream.BuildTimeline()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building timeline: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
-	// ═══════════════════════════════════════════════════════════════
-	// STEP 2: REPLAY INTO EACH SYSTEM
-	// ═══════════════════════════════════════════════════════════════
-	allResults := make(map[string][]replay.CommitMetrics)
+	if *limit > 0 && *limit < len(groups) {
+		groups = groups[:*limit]
+	}
+	fmt.Printf("Processing %d commit groups\n\n", len(groups))
+
+	// Init all replayers.
+	type runner struct {
+		name    string
+		sys     string
+		r       replay.Replayer
+		metrics []replay.CommitMetrics
+		cumFile int64
+		cumTime float64
+	}
+	var runners []runner
 
 	for _, sysName := range systemList {
-		replayer := createReplayer(sysName)
-		if replayer == nil {
+		r := createReplayer(sysName)
+		if r == nil {
 			fmt.Fprintf(os.Stderr, "Unknown system: %s (skipping)\n", sysName)
 			continue
 		}
-
-		fmt.Printf("Step 2: Replaying into %s...\n", replayer.Name())
 		repoDir := filepath.Join(absOutput, sanitizeDir(sysName)+"_repo")
-
 		os.RemoveAll(repoDir)
 		os.RemoveAll(repoDir + "_upstream")
-
-		if err := replayer.Init(repoDir); err != nil {
-			fmt.Fprintf(os.Stderr, "  Error initializing %s: %v\n", replayer.Name(), err)
+		if err := r.Init(repoDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing %s: %v\n", r.Name(), err)
 			continue
 		}
-
-		var metrics []replay.CommitMetrics
-		var cumFileSize int64
-		var cumCommitTime float64
-		startReplay := time.Now()
-
-		for _, group := range groups {
-			m, err := replayer.ReplayCommit(group)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error at commit %d: %v\n", group.Index, err)
-
-				m = replay.CommitMetrics{CommitNr: group.Index}
-			}
-
-			cumFileSize += m.ModifiedFileMB
-			cumCommitTime += m.CommitTimeSec
-			m.CumFileSizeMB = cumFileSize
-			m.CumCommitTimeSec = cumCommitTime
-
-			metrics = append(metrics, m)
-
-			if group.Index%10 == 0 || group.Index == len(groups) {
-				fmt.Printf("  [%s] Commit %d/%d - %.1fs cumulative, %d MB metadata\n",
-					replayer.Name(), group.Index, len(groups), cumCommitTime, m.MetadataSizeMB)
-			}
-		}
-
-		replayer.Cleanup()
-		allResults[sysName] = metrics
-		elapsed := time.Since(startReplay).Round(time.Second)
-		fmt.Printf("  %s complete: %d commits in %s (total commit time: %.1fs)\n\n",
-			replayer.Name(), len(metrics), elapsed, cumCommitTime)
+		runners = append(runners, runner{name: r.Name(), sys: sysName, r: r})
 	}
 
-	// ═══════════════════════════════════════════════════════════════
-	// STEP 3: WRITE REPORTS
-	// ═══════════════════════════════════════════════════════════════
-	fmt.Println("Step 3: Writing reports...")
-	var csvSystems []string
-	for _, sysName := range systemList {
-		metrics, ok := allResults[sysName]
-		if !ok {
-			continue
+	if len(runners) == 0 {
+		fmt.Fprintln(os.Stderr, "No systems initialized")
+		os.Exit(1)
+	}
+
+	// Replay commits. In streaming mode: extract -> replay all systems -> clean per commit.
+	os.MkdirAll(stagingDir, 0755)
+	startAll := time.Now()
+
+	for i := range groups {
+		group := &groups[i]
+
+		if stream != nil {
+			if err := stream.StageGroup(group, stagingDir); err != nil {
+				fmt.Fprintf(os.Stderr, "  Error staging commit %d: %v\n", group.Index, err)
+				continue
+			}
 		}
-		displayName := systemDisplayName(sysName)
-		if err := report.WriteCSV(absOutput, displayName, metrics); err != nil {
+
+		for j := range runners {
+			m, err := runners[j].r.ReplayCommit(*group)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  [%s] Error at commit %d: %v\n", runners[j].name, group.Index, err)
+				m = replay.CommitMetrics{CommitNr: group.Index}
+			}
+			runners[j].cumFile += m.ModifiedFileMB
+			runners[j].cumTime += m.CommitTimeSec
+			m.CumFileSizeMB = runners[j].cumFile
+			m.CumCommitTimeSec = runners[j].cumTime
+			runners[j].metrics = append(runners[j].metrics, m)
+		}
+
+		if stream != nil {
+			extract.CleanGroup(stagingDir, group.Index)
+		}
+
+		if group.Index%10 == 0 || group.Index == len(groups) {
+			fmt.Printf("  Commit %d/%d (%s elapsed)\n", group.Index, len(groups), time.Since(startAll).Round(time.Second))
+		}
+	}
+
+	for i := range runners {
+		runners[i].r.Cleanup()
+	}
+	fmt.Printf("\nAll systems complete in %s\n\n", time.Since(startAll).Round(time.Second))
+
+	// Write reports.
+	fmt.Println("Writing reports...")
+	var csvSystems []string
+	for _, rn := range runners {
+		displayName := systemDisplayName(rn.sys)
+		if err := report.WriteCSV(absOutput, displayName, rn.metrics); err != nil {
 			fmt.Fprintf(os.Stderr, "  Error writing CSV for %s: %v\n", displayName, err)
 			continue
 		}
@@ -158,7 +177,7 @@ func main() {
 
 	if len(csvSystems) > 0 {
 		if err := report.WriteGnuplotScript(absOutput, csvSystems); err != nil {
-			fmt.Fprintf(os.Stderr, "  Error writing gnuplot script: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  Error writing gnuplot: %v\n", err)
 		} else {
 			fmt.Println("  Wrote plot_benchmark.gnuplot")
 		}
