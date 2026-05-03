@@ -16,32 +16,55 @@ In 2023, Blender Studio published a benchmark comparing SVN, Git, Git LFS, and M
 
 > **[Benchmarking Version Control Solutions for Creative Collaboration](https://studio.blender.org/blog/benchmarking-version-control-git-lfs-svn-mercurial/)**
 
-Their conclusion: **Git LFS with pre-compressed `.blend` files** was the best available option - but still far from ideal for creative teams. That's exactly the trade-off Blender Studio found: LFS trades storage efficiency for commit speed.
-
 This benchmark extends that approach by adding Clustta and Perforce to the comparison, using the same "replay every commit and measure" methodology on a real creative production project.
 
 ## Results
 
-155 commits from a real Clustta creative project (~4.5 GB of `.blend` files) replayed into each system. Lower is better on both axes.
+Across 788 commits and 148 GB of assets, **Clustta finished in 12.8 minutes** and stored everything in just 37.5 GB - making it both the fastest and most storage-efficient system tested. 
+
+**Git LFS came in a close second on speed (14.7 min)** but used nearly **4x more disk (146.6 GB)** since it stores each file version in full. 
+
+Git and SVN took roughly 40 minutes each, though Git's delta compression halved its storage footprint compared to SVN. Perforce was the clear outlier at nearly 2 hours.
+ 
 
 ![Summary comparison](results/benchmark_summary.png)
 
-| System | Cumulative commit time | Repository size |
-|--------|----------------------:|----------------:|
-| **Clustta** | 30.0 s | 1,408 MB |
-| **Git LFS** | 79.5 s | 5,549 MB |
-| **Git** | 88.6 s | 2,788 MB |
-| **SVN** | 125.5 s | 5,549 MB |
-| **Perforce** | 224.4 s | 2,863 MB |
+Lower is better on both graphs.
+
+| System | Commit time | Repository size |
+|--------|------------:|-----------:|
+| **Clustta** | 12.8 min | 36.6 GB |
+| **Git LFS** | 14.7 min | 143.2 GB |
+| **Git** | 38.0 min | 78.6 GB |
+| **SVN** | 42.9 min | 145.1 GB |
+| **Perforce** | 111.3 min | 78.8 GB |
+
 
 ### Test environment
 
-| Component | Detail |
+#### Project
+
+| | |
+|-----------|--------|
+| Project | [Tired King (ikegwudike)](https://eaxum.com/portfolio/ikegwudike/) - 3D animation production |
+| Assets | 199 files (`.blend`, `.psd`, `.fbx`, etc.) |
+| Commits | 788 commit groups, 1,167 checkpoints |
+| Total file data | ~148 GB (uncompressed) |
+| Largest single file | 3.6 GB |
+
+#### Hardware
+
+| | |
 |-----------|--------|
 | CPU | Intel Core i7-14700F (20 cores / 28 threads, up to 5.4 GHz) |
 | RAM | 16 GB DDR5 |
 | Disk | Samsung PM9A1 1 TB NVMe SSD (~6,900 / 5,100 MB/s seq R/W) |
 | OS | Windows 11 Pro (build 26200) |
+
+#### VCS versions
+
+| | |
+|-----------|--------|
 | Git | 2.45.2 |
 | SVN | 1.14.5 |
 | Perforce | P4 2025.2/2907753 |

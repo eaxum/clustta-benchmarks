@@ -152,6 +152,14 @@ func main() {
 			extract.CleanGroup(stagingDir, group.Index)
 		}
 
+		// Save CSVs every 10 commits for crash resilience.
+		if group.Index%10 == 0 || i == len(groups)-1 {
+			for j := range runners {
+				displayName := systemDisplayName(runners[j].sys)
+				report.WriteCSV(absOutput, displayName, runners[j].metrics)
+			}
+		}
+
 		if group.Index%10 == 0 || group.Index == len(groups) {
 			fmt.Printf("  Commit %d/%d (%s elapsed)\n", group.Index, len(groups), time.Since(startAll).Round(time.Second))
 		}
