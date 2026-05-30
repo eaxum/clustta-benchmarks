@@ -13,7 +13,8 @@ import (
 )
 
 func main() {
-	source := flag.String("source", "", "Path to the source .clst file")
+	source := flag.String("source", "", "Path to the source: a .clst file or a local SVN repo/URL")
+	sourceType := flag.String("source-type", "auto", "Source backend: clst, svn, or auto (detect from --source)")
 	output := flag.String("output", "./results", "Output directory for results")
 	systems := flag.String("systems", "git,git-lfs,svn,perforce,clustta", "Comma-separated list of systems to benchmark")
 	limit := flag.Int("limit", 0, "Max commit groups to process (0 = all)")
@@ -46,8 +47,11 @@ func main() {
 	stagingDir := filepath.Join(absOutput, "staging")
 	systemList := parseSystemList(*systems)
 
+	sourceKind := resolveSourceKind(*sourceType, *source)
+
 	fmt.Printf("Benchmark Configuration:\n")
 	fmt.Printf("  Source:  %s\n", absSource)
+	fmt.Printf("  Type:    %s\n", sourceKind)
 	fmt.Printf("  Output:  %s\n", absOutput)
 	fmt.Printf("  Systems: %v\n", systemList)
 	if *limit > 0 {
@@ -57,7 +61,7 @@ func main() {
 
 	// Build or load timeline.
 	var groups []extract.CommitGroup
-	var stream *extract.StreamSource
+	var src extract.Source
 
 	if *skipExtract {
 		fmt.Println("Loading saved timeline (--skip-extract)...")
@@ -69,15 +73,26 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		fmt.Println("Building timeline from .clst...")
 		var err error
-		stream, err = extract.OpenStream(absSource)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-			os.Exit(1)
+		switch sourceKind {
+		case "svn":
+			fmt.Println("Building timeline from SVN repository...")
+			workCopy := filepath.Join(absOutput, "svn_source_wc")
+			src, err = extract.OpenSvnSource(*source, workCopy)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening SVN source: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Println("Building timeline from .clst...")
+			src, err = extract.OpenStream(absSource)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+				os.Exit(1)
+			}
 		}
-		defer stream.Close()
-		groups, err = stream.BuildTimeline()
+		defer src.Close()
+		groups, err = src.BuildTimeline()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error building timeline: %v\n", err)
 			os.Exit(1)
@@ -128,8 +143,8 @@ func main() {
 	for i := range groups {
 		group := &groups[i]
 
-		if stream != nil {
-			if err := stream.StageGroup(group, stagingDir); err != nil {
+		if src != nil {
+			if err := src.StageGroup(group, stagingDir); err != nil {
 				fmt.Fprintf(os.Stderr, "  Error staging commit %d: %v\n", group.Index, err)
 				continue
 			}
@@ -148,8 +163,8 @@ func main() {
 			runners[j].metrics = append(runners[j].metrics, m)
 		}
 
-		if stream != nil {
-			extract.CleanGroup(stagingDir, group.Index)
+		if src != nil {
+			src.CleanGroup(stagingDir, group.Index)
 		}
 
 		// Save CSVs every 10 commits for crash resilience.
@@ -192,6 +207,19 @@ func main() {
 	}
 
 	fmt.Println("\nDone!")
+}
+
+// resolveSourceKind decides which source backend to use. An explicit
+// --source-type wins; otherwise it is inferred from the --source path.
+func resolveSourceKind(sourceType, source string) string {
+	kind := strings.TrimSpace(strings.ToLower(sourceType))
+	if kind != "" && kind != "auto" {
+		return kind
+	}
+	if strings.HasSuffix(strings.ToLower(source), ".clst") {
+		return "clst"
+	}
+	return "svn"
 }
 
 func parseSystemList(s string) []string {

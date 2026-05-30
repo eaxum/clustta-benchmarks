@@ -30,3 +30,4 @@ results/*_repo/
 results/*_repo_upstream/
 results/staging/
 results/*.svg
+results/svn_source_wc
