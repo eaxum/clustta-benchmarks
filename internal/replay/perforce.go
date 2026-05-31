@@ -64,6 +64,28 @@ func (p *PerforceReplayer) Init(workDir string) error {
 
 	absServer, _ := filepath.Abs(p.serverRoot)
 
+	// Defensively stop any p4d left over from a previous (possibly failed) run
+	// that may still be holding port 1667, so our bind doesn't fail.
+	stop := exec.Command(p4Exe, "-p", "localhost:"+p4Port, "admin", "stop")
+	stop.Env = cleanP4Env()
+	_ = stop.Run()
+	time.Sleep(500 * time.Millisecond)
+
+	// Recent p4d defaults to a non-zero security level, where *every* command
+	// (even "configure set security=0") demands a password - a chicken-and-egg
+	// problem on a brand-new server. So we set the configurables OFFLINE, before
+	// starting the server, via "p4d -cset", which writes db.config directly with
+	// no authentication. security=0 disables password auth; the first user to
+	// connect is then auto-created as super.
+	for _, kv := range []string{"security=0", "dm.user.noautocreate=0"} {
+		cfg := exec.Command(p4dExe, "-r", absServer, "-cset", kv)
+		cfg.Stderr = os.Stderr
+		cfg.Env = cleanP4Env()
+		if err := cfg.Run(); err != nil {
+			return fmt.Errorf("p4d -cset %s: %w", kv, err)
+		}
+	}
+
 	p.p4dCmd = exec.Command(p4dExe, "-r", absServer, "-p", "localhost:"+p4Port)
 	p.p4dCmd.Stdout = nil
 	p.p4dCmd.Stderr = os.Stderr
@@ -72,13 +94,6 @@ func (p *PerforceReplayer) Init(workDir string) error {
 		return fmt.Errorf("p4d start: %w", err)
 	}
 	time.Sleep(2 * time.Second)
-
-	// Recent p4d defaults to a non-zero security level, which would demand a
-	// password before we can even create the workspace. On a brand-new server
-	// root the first connection is auto-granted super, so we can disable auth
-	// here. Errors are non-fatal in case a given p4d build defaults to 0.
-	p.p4run("configure", "set", "security=0")
-	p.p4run("configure", "set", "dm.user.noautocreate=2")
 
 	absWork, _ := filepath.Abs(p.workDir)
 	spec := fmt.Sprintf(
