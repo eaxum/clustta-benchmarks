@@ -67,10 +67,18 @@ func (p *PerforceReplayer) Init(workDir string) error {
 	p.p4dCmd = exec.Command(p4dExe, "-r", absServer, "-p", "localhost:"+p4Port)
 	p.p4dCmd.Stdout = nil
 	p.p4dCmd.Stderr = os.Stderr
+	p.p4dCmd.Env = cleanP4Env()
 	if err := p.p4dCmd.Start(); err != nil {
 		return fmt.Errorf("p4d start: %w", err)
 	}
 	time.Sleep(2 * time.Second)
+
+	// Recent p4d defaults to a non-zero security level, which would demand a
+	// password before we can even create the workspace. On a brand-new server
+	// root the first connection is auto-granted super, so we can disable auth
+	// here. Errors are non-fatal in case a given p4d build defaults to 0.
+	p.p4run("configure", "set", "security=0")
+	p.p4run("configure", "set", "dm.user.noautocreate=2")
 
 	absWork, _ := filepath.Abs(p.workDir)
 	spec := fmt.Sprintf(
@@ -78,6 +86,7 @@ func (p *PerforceReplayer) Init(workDir string) error {
 		p.client, p.user, absWork, p.client)
 
 	cmd := exec.Command(p4Exe, "-p", "localhost:"+p4Port, "-u", p.user, "-c", p.client, "client", "-i")
+	cmd.Env = cleanP4Env()
 	cmd.Stdin = strings.NewReader(spec)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -85,6 +94,21 @@ func (p *PerforceReplayer) Init(workDir string) error {
 	}
 
 	return nil
+}
+
+// cleanP4Env returns the current environment with all P4* variables stripped,
+// so a system-wide p4d/p4 configuration (P4PORT, P4PASSWD, P4CONFIG, tickets,
+// etc.) can't leak into the isolated benchmark server on port 1667.
+func cleanP4Env() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "P4") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // ReplayCommit reconciles and submits one changelist.
@@ -139,5 +163,6 @@ func (p *PerforceReplayer) p4run(args ...string) error {
 	cmd.Dir = p.workDir
 	cmd.Stdout = nil
 	cmd.Stderr = os.Stderr
+	cmd.Env = cleanP4Env()
 	return cmd.Run()
 }
