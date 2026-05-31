@@ -40,6 +40,7 @@ type PerforceReplayer struct {
 	p4dCmd     *exec.Cmd
 	user       string
 	client     string
+	env        []string
 }
 
 // NewPerforceReplayer creates a replayer with the given username.
@@ -64,36 +65,36 @@ func (p *PerforceReplayer) Init(workDir string) error {
 
 	absServer, _ := filepath.Abs(p.serverRoot)
 
+	// Fully isolate this server/client from any system-wide Perforce config.
+	// The earlier configure-p4d.sh run persists credentials (P4PORT, P4USER,
+	// P4PASSWD, tickets) in ~/.p4enviro and ~/.p4tickets; stripping process env
+	// vars is not enough because p4 still reads those files, then sends the
+	// *system* server's password to our fresh server -> "P4PASSWD invalid or
+	// unset". Pointing P4ENVIRO/P4TICKETS/P4TRUST at throwaway paths under the
+	// server root, plus explicit P4PORT/P4USER, guarantees a clean slate.
+	p.env = isolatedP4Env(absServer, p.user)
+
 	// Defensively stop any p4d left over from a previous (possibly failed) run
 	// that may still be holding port 1667, so our bind doesn't fail.
 	stop := exec.Command(p4Exe, "-p", "localhost:"+p4Port, "admin", "stop")
-	stop.Env = cleanP4Env()
+	stop.Env = p.env
 	_ = stop.Run()
 	time.Sleep(500 * time.Millisecond)
-
-	// Recent p4d defaults to a non-zero security level, where *every* command
-	// (even "configure set security=0") demands a password - a chicken-and-egg
-	// problem on a brand-new server. So we set the configurables OFFLINE, before
-	// starting the server, via "p4d -cset", which writes db.config directly with
-	// no authentication. security=0 disables password auth; the first user to
-	// connect is then auto-created as super.
-	for _, kv := range []string{"security=0", "dm.user.noautocreate=0"} {
-		cfg := exec.Command(p4dExe, "-r", absServer, "-cset", kv)
-		cfg.Stderr = os.Stderr
-		cfg.Env = cleanP4Env()
-		if err := cfg.Run(); err != nil {
-			return fmt.Errorf("p4d -cset %s: %w", kv, err)
-		}
-	}
 
 	p.p4dCmd = exec.Command(p4dExe, "-r", absServer, "-p", "localhost:"+p4Port)
 	p.p4dCmd.Stdout = nil
 	p.p4dCmd.Stderr = os.Stderr
-	p.p4dCmd.Env = cleanP4Env()
+	p.p4dCmd.Env = p.env
 	if err := p.p4dCmd.Start(); err != nil {
 		return fmt.Errorf("p4d start: %w", err)
 	}
 	time.Sleep(2 * time.Second)
+
+	// On a brand-new server the first connection is auto-granted super, so we
+	// can disable password security and enable user auto-creation. Non-fatal:
+	// if the server already defaults to security=0 these are harmless no-ops.
+	p.p4run("configure", "set", "security=0")
+	p.p4run("configure", "set", "dm.user.noautocreate=0")
 
 	absWork, _ := filepath.Abs(p.workDir)
 	spec := fmt.Sprintf(
@@ -101,7 +102,7 @@ func (p *PerforceReplayer) Init(workDir string) error {
 		p.client, p.user, absWork, p.client)
 
 	cmd := exec.Command(p4Exe, "-p", "localhost:"+p4Port, "-u", p.user, "-c", p.client, "client", "-i")
-	cmd.Env = cleanP4Env()
+	cmd.Env = p.env
 	cmd.Stdin = strings.NewReader(spec)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -111,18 +112,26 @@ func (p *PerforceReplayer) Init(workDir string) error {
 	return nil
 }
 
-// cleanP4Env returns the current environment with all P4* variables stripped,
-// so a system-wide p4d/p4 configuration (P4PORT, P4PASSWD, P4CONFIG, tickets,
-// etc.) can't leak into the isolated benchmark server on port 1667.
-func cleanP4Env() []string {
+// isolatedP4Env returns an environment for p4/p4d that is fully isolated from
+// any system-wide Perforce configuration. It strips all inherited P4* vars and
+// pins the connection settings, redirecting per-user state files (enviro,
+// tickets, trust) into the throwaway server root.
+func isolatedP4Env(serverRoot, user string) []string {
 	env := os.Environ()
-	out := make([]string, 0, len(env))
+	out := make([]string, 0, len(env)+5)
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "P4") {
 			continue
 		}
 		out = append(out, kv)
 	}
+	out = append(out,
+		"P4PORT=localhost:"+p4Port,
+		"P4USER="+user,
+		"P4ENVIRO="+filepath.Join(serverRoot, ".p4enviro"),
+		"P4TICKETS="+filepath.Join(serverRoot, ".p4tickets"),
+		"P4TRUST="+filepath.Join(serverRoot, ".p4trust"),
+	)
 	return out
 }
 
@@ -178,6 +187,6 @@ func (p *PerforceReplayer) p4run(args ...string) error {
 	cmd.Dir = p.workDir
 	cmd.Stdout = nil
 	cmd.Stderr = os.Stderr
-	cmd.Env = cleanP4Env()
+	cmd.Env = p.env
 	return cmd.Run()
 }
