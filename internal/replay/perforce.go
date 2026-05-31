@@ -57,8 +57,9 @@ func (p *PerforceReplayer) Name() string {
 
 // Init starts a local p4d and creates a workspace.
 func (p *PerforceReplayer) Init(workDir string) error {
-	p.workDir = workDir
-	p.serverRoot = workDir + "_upstream"
+	absWork, _ := filepath.Abs(workDir)
+	p.workDir = absWork
+	p.serverRoot = absWork + "_upstream"
 
 	os.MkdirAll(p.serverRoot, 0755)
 	os.MkdirAll(p.workDir, 0755)
@@ -109,7 +110,6 @@ func (p *PerforceReplayer) Init(workDir string) error {
 	_ = p.p4run("configure", "set", "security=0")
 	_ = p.p4run("configure", "set", "dm.user.noautocreate=0")
 
-	absWork, _ := filepath.Abs(p.workDir)
 	spec := fmt.Sprintf(
 		"Client: %s\nOwner: %s\nRoot: %s\nOptions: allwrite clobber\nView:\n\t//depot/... //%s/...\n",
 		p.client, p.user, absWork, p.client)
@@ -157,7 +157,11 @@ func (p *PerforceReplayer) ReplayCommit(group extract.CommitGroup) (CommitMetric
 	}
 
 	start := time.Now()
-	reconcileErr := p.p4run("reconcile")
+	// Reconcile against an explicit absolute path under the client root rather
+	// than relying on the process cwd (which is the benchmark repo dir after
+	// run_benchmark.sh's "cd $REPO"). Without this, p4 resolves "..." against
+	// the wrong directory and reports "not under client's root".
+	reconcileErr := p.p4run("reconcile", filepath.Join(p.workDir, "..."))
 
 	if reconcileErr == nil {
 		msg := fmt.Sprintf("commit %d", group.Index)
