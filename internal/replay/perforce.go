@@ -6,15 +6,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
 
-const (
-	p4Exe  = `C:\Program Files\Perforce\p4.exe`
-	p4dExe = `C:\Program Files\Perforce\Server\p4d.exe`
-	p4Port = "1667"
+const p4Port = "1667"
+
+// p4Exe and p4dExe locate the Perforce client/server binaries. They default to
+// the standard Windows install paths on Windows and to bare names resolved on
+// PATH elsewhere (Linux/macOS). Override with the P4_EXE / P4D_EXE env vars.
+var (
+	p4Exe  = resolveP4Bin("P4_EXE", `C:\Program Files\Perforce\p4.exe`, "p4")
+	p4dExe = resolveP4Bin("P4D_EXE", `C:\Program Files\Perforce\Server\p4d.exe`, "p4d")
 )
+
+// resolveP4Bin picks the binary path: env override first, then the
+// OS-appropriate default (Windows install path vs. bare name on PATH).
+func resolveP4Bin(env, windowsPath, unixName string) string {
+	if v := os.Getenv(env); v != "" {
+		return v
+	}
+	if runtime.GOOS == "windows" {
+		return windowsPath
+	}
+	return unixName
+}
 
 // PerforceReplayer benchmarks Perforce (Helix Core).
 type PerforceReplayer struct {
