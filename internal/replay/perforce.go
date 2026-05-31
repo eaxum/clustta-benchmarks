@@ -90,22 +90,31 @@ func (p *PerforceReplayer) Init(workDir string) error {
 	}
 	time.Sleep(2 * time.Second)
 
-	// On a brand-new server the first connection is auto-granted super, so we
-	// can disable password security and enable user auto-creation. Non-fatal:
-	// if the server already defaults to security=0 these are harmless no-ops.
-	p.p4run("configure", "set", "security=0")
-	p.p4run("configure", "set", "dm.user.noautocreate=0")
+	// Bootstrap authentication. We can't know the fresh server's default
+	// security level in advance (newer Helix packages may default it high,
+	// where every command - even "configure set" - demands a logged-in user
+	// with a password). So we run a best-effort sequence that satisfies any
+	// level, ignoring individual failures, and only hard-fail later on the
+	// workspace creation:
+	//   1. Create the benchmark user (the first user on a brand-new server is
+	//      auto-granted super access, so -f works without a prior login).
+	//   2. Set a strong password (required at security level >= 2/3).
+	//   3. Log in to obtain a ticket.
+	//   4. Lower security to 0 so subsequent reconcile/submit are frictionless.
+	const p4pass = "Benchmark_pass_123"
+	userSpec := fmt.Sprintf("User: %s\nEmail: %s@localhost\nFullName: Benchmark User\n", p.user, p.user)
+	_ = p.p4in(userSpec, "user", "-f", "-i")
+	_ = p.p4in(p4pass+"\n"+p4pass+"\n", "passwd")
+	_ = p.p4in(p4pass+"\n", "login")
+	_ = p.p4run("configure", "set", "security=0")
+	_ = p.p4run("configure", "set", "dm.user.noautocreate=0")
 
 	absWork, _ := filepath.Abs(p.workDir)
 	spec := fmt.Sprintf(
 		"Client: %s\nOwner: %s\nRoot: %s\nOptions: allwrite clobber\nView:\n\t//depot/... //%s/...\n",
 		p.client, p.user, absWork, p.client)
 
-	cmd := exec.Command(p4Exe, "-p", "localhost:"+p4Port, "-u", p.user, "-c", p.client, "client", "-i")
-	cmd.Env = p.env
-	cmd.Stdin = strings.NewReader(spec)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	if out, err := p.p4inOut(spec, "client", "-i"); err != nil {
 		return fmt.Errorf("p4 client -i: %w\n%s", err, string(out))
 	}
 
@@ -189,4 +198,21 @@ func (p *PerforceReplayer) p4run(args ...string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = p.env
 	return cmd.Run()
+}
+
+// p4in runs a p4 command feeding stdin, discarding output. Used for the
+// best-effort bootstrap steps (user/passwd/login) where failures are ignored.
+func (p *PerforceReplayer) p4in(stdin string, args ...string) error {
+	_, err := p.p4inOut(stdin, args...)
+	return err
+}
+
+// p4inOut runs a p4 command feeding stdin and returns its combined output.
+func (p *PerforceReplayer) p4inOut(stdin string, args ...string) ([]byte, error) {
+	full := append([]string{"-p", "localhost:" + p4Port, "-u", p.user, "-c", p.client}, args...)
+	cmd := exec.Command(p4Exe, full...)
+	cmd.Dir = p.workDir
+	cmd.Env = p.env
+	cmd.Stdin = strings.NewReader(stdin)
+	return cmd.CombinedOutput()
 }
