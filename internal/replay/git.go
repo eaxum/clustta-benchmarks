@@ -53,18 +53,18 @@ func (g *GitReplayer) ReplayCommit(group extract.CommitGroup) (CommitMetrics, er
 		modifiedSize += f.FileSize
 	}
 
-	// Time git add (where the real work happens for binaries).
+	// Timed window (Option A): the local durable commit = `git add` + `git commit`.
+	// Vanilla Git has no remote here, so this is the full distributed commit cost.
 	start := time.Now()
 	if err := g.git("add", "."); err != nil {
 		return CommitMetrics{}, fmt.Errorf("git add: %w", err)
 	}
-	addTime := time.Since(start).Seconds()
 
-	// Commit (not timed, same as Blender approach).
 	msg := fmt.Sprintf("commit %d", group.Index)
 	if err := g.git("commit", "-m", msg, "--allow-empty"); err != nil {
 		return CommitMetrics{}, fmt.Errorf("git commit: %w", err)
 	}
+	commitTime := time.Since(start).Seconds()
 
 	totalSize := dirSizeMB(g.workDir)
 	gitSize := dirSizeMB(filepath.Join(g.workDir, ".git"))
@@ -74,7 +74,7 @@ func (g *GitReplayer) ReplayCommit(group extract.CommitGroup) (CommitMetrics, er
 		LocalSizeMB:    totalSize,
 		MetadataSizeMB: gitSize,
 		ModifiedFileMB: modifiedSize / (1024 * 1024),
-		CommitTimeSec:  addTime,
+		CommitTimeSec:  commitTime,
 	}, nil
 }
 

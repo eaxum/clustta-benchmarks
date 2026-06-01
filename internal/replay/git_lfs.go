@@ -97,17 +97,23 @@ func (g *GitLFSReplayer) ReplayCommit(group extract.CommitGroup) (CommitMetrics,
 		modifiedSize += f.FileSize
 	}
 
+	// Timed window (Option A): the local durable commit. For a distributed VCS
+	// this is `git add` + `git commit` against the local repo. The subsequent
+	// `git push` is the network/server sync and is intentionally NOT timed.
 	start := time.Now()
 	if err := g.git("add", "."); err != nil {
 		return CommitMetrics{}, fmt.Errorf("git add: %w", err)
 	}
-	addTime := time.Since(start).Seconds()
 
 	msg := fmt.Sprintf("commit %d", group.Index)
 	if err := g.git("commit", "-m", msg, "--allow-empty"); err != nil {
 		return CommitMetrics{}, fmt.Errorf("git commit: %w", err)
 	}
+	commitTime := time.Since(start).Seconds()
 
+	// Push to the upstream is the distributed "sync" step, excluded from the
+	// local-commit measurement. Kept (untimed) only so the upstream/server
+	// size can still be reported on the storage axis.
 	if err := g.git("push"); err != nil {
 		return CommitMetrics{}, fmt.Errorf("git push: %w", err)
 	}
@@ -122,7 +128,7 @@ func (g *GitLFSReplayer) ReplayCommit(group extract.CommitGroup) (CommitMetrics,
 		MetadataSizeMB: gitSize,
 		ServerSizeMB:   upstreamSize,
 		ModifiedFileMB: modifiedSize / (1024 * 1024),
-		CommitTimeSec:  addTime,
+		CommitTimeSec:  commitTime,
 	}, nil
 }
 

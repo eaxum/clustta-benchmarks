@@ -169,6 +169,7 @@ func (c *ClusttaReplayer) ReplayCommit(group extract.CommitGroup) (CommitMetrics
 		CommitNr:       group.Index,
 		LocalSizeMB:    totalSize,
 		MetadataSizeMB: clstSize,
+		ServerSizeMB:   clstSize,
 		ModifiedFileMB: modifiedSize / (1024 * 1024),
 		CommitTimeSec:  checkpointTime,
 	}, nil
